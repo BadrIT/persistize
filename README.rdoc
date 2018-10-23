@@ -43,6 +43,38 @@ Sometimes you want to update the field not when the record is changed, but when 
 
   task.update_attributes(:completed => true)
   Project.completed  # [#<Project id:1, name:"Rails", completed:true ...>]
+
+You can add dependency as a hash, in rails 5:
+
+  class Project < ActiveRecord::Base
+    has_many :tasks
+  
+    def completed?
+      true
+    end
+
+    # if you didn't add save or destroy Proc it will be evaluate to true by default
+    persistize :completed?, depending_on: { tasks: {
+        save: Proc.new{ |task| Task.any? && Task.all?(&:completed?) },
+        destroy: Proc.new{ |task| any_condition }
+      }
+    }
+  
+    scope :completed, -> { where(completed: true) }
+  end
+
+  class Task < ActiveRecord::Base
+    belongs_to :project
+  end
+
+  ...
+
+  project = Project.create(name: 'Rails')
+  task = project.tasks.create(name: 'Make it scale', completed: false)    
+  Project.completed  # []
+
+  task.update(completed: true)
+  Project.completed  # [#<Project id:1, name:"Rails", completed:true ...>]
     
 You can add more than one dependency using an array:
 
