@@ -88,6 +88,15 @@ You can use save, destroy and when procs.
 * destroy: will be checked with each task after_destroy
 * when: will be checked with each task save OR destroy
 
+You can add more optimization by checking only if Task#completed changed. So any other change in task subject or any other attribute does NOT affect Project#completed
+
+  persistize :completed?, depending_on: { tasks: {
+      save: Proc.new do |project, task| 
+        project.completed != task.completed? && (task.new_record? || task.saved_change_to_completed?)
+      end
+    }
+  }
+
 You can add more than one dependency using an array:
 
   persistize :summary, :depending_on => [:projects, :people, :tasks]
