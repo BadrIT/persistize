@@ -44,19 +44,25 @@ Sometimes you want to update the field not when the record is changed, but when 
   task.update_attributes(:completed => true)
   Project.completed  # [#<Project id:1, name:"Rails", completed:true ...>]
 
-You can add dependency as a hash, in rails 5:
+In the previous example, project was depending on task for calculating Project#completed. But this will call Project#completed with every create, update or destroy for any task. For more performance optimization, you may want to recalculate Project#completed in some certain cases.
+
+For example, in the previous example, if the project was uncompleted and you created a new uncompleted task, you don't have to recheck if project will be completed or not.
+
+You can add dependency as a hash, in Rails 5:
 
   class Project < ActiveRecord::Base
     has_many :tasks
   
     def completed?
-      true
+      tasks.any? && tasks.all?(&:completed?)
     end
 
+    # update project completed status only if the new/updated task status is different than the project status
     # if you didn't add save or destroy Proc it will be evaluate to true by default
     persistize :completed?, depending_on: { tasks: {
-        save: Proc.new{ |task| Task.any? && Task.all?(&:completed?) },
-        destroy: Proc.new{ |task| any_condition }
+        save: Proc.new{ |project, task| project.completed != task.completed? },
+        # destroy: Proc.new{ |project, task| any_condition },
+        # when: Proc.new{ |project, task| any_condition }
       }
     }
   
@@ -71,11 +77,17 @@ You can add dependency as a hash, in rails 5:
 
   project = Project.create(name: 'Rails')
   task = project.tasks.create(name: 'Make it scale', completed: false)    
-  Project.completed  # []
+  project.completed  # false and no need to recalculate project status
 
-  task.update(completed: true)
+  task.update(completed: true) # now project completed status will be recalculated
   Project.completed  # [#<Project id:1, name:"Rails", completed:true ...>]
     
+You can use save, destroy and when procs.
+
+* Save: will be checked with each task after_save
+* destroy: will be checked with each task after_destroy
+* when: will be checked with each task save OR destroy
+
 You can add more than one dependency using an array:
 
   persistize :summary, :depending_on => [:projects, :people, :tasks]
