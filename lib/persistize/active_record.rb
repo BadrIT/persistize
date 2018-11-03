@@ -50,12 +50,12 @@ module Persistize
             if options[:depending_on].is_a?(Array) || options[:depending_on].is_a?(Symbol)
               dependencies = [options[:depending_on]].flatten
               dependencies.each do |dependency|
-                generate_callback(reflections[dependency.to_s], update_method, Proc.new{true})
+                generate_callback(reflections[dependency.to_s], update_method)
               end
-            end
-            if options[:depending_on].is_a? Hash
+            
+            elsif options[:depending_on].is_a? Hash
               dependencies = options[:depending_on]
-              dependencies.each do |key, value|                   # value => Hash Contain two <Proc...> for after_save and after_destroy
+              dependencies.each do |key, value|                   # value => Hash Contain three <Proc...> for save, destroy and when
                 generate_callback(reflections[key.to_s], update_method, value)
               end
             end
@@ -66,52 +66,90 @@ module Persistize
 
       private
 
-      def generate_callback(association, update_method, conditional_block)
+      def generate_callback(association, update_method, conditional_block=nil)
         callback_name = :"#{update_method}_in_#{self.to_s.underscore.gsub(/\W/, '_')}_callback"
         association_type = "#{association.macro}#{'_through' if association.through_reflection}"
         generate_method = :"generate_#{association_type}_callback"
         unless respond_to?(generate_method, true)
           raise "#{association_type} associations are not supported by persistize"
         end
-        send(generate_method, association, update_method, callback_name, conditional_block)
+
+        # true by default
+        conditional_block ||= {}
+        conditional_block[:when] ||= Proc.new{|_a,_b| true}
+        conditional_block[:save] ||= Proc.new{|_a,_b| true}
+        conditional_block[:destroy] ||= Proc.new{|_a,_b| true}
+
+        blocks = if association.klass.class_variable_defined?(:@@_persistize_conditional_block)
+          association.klass.class_variable_get(:@@_persistize_conditional_block)
+        else
+          {}
+        end
+        blocks["_proc_#{callback_name}"] = conditional_block
+        association.klass.class_variable_set(:@@_persistize_conditional_block, blocks)
+
+        unless association.klass.instance_methods.include?(:apply_persistize?)
+          association.klass.class_eval <<-RUBY, __FILE__, __LINE__ + 1
+            def apply_persistize?(persistized_obj, depending_on_obj, callback_name)
+              conditional_block = @@_persistize_conditional_block["_proc_#{callback_name}"]
+              if conditional_block[:when].call(persistized_obj, depending_on_obj)
+                apply_destroy = destroyed? && conditional_block[:destroy].call(persistized_obj, depending_on_obj)
+                apply_save = !destroyed? && conditional_block[:save].call(persistized_obj, depending_on_obj)
+                return apply_destroy || apply_save
+              else
+                return false
+              end
+            end
+          RUBY
+        end
+
+        send(generate_method, association, update_method, callback_name)
       end
 
-      def generate_has_many_callback(association, update_method, callback_name, conditional_block)
+      def generate_has_many_callback(association, update_method, callback_name)
         association.klass.class_eval <<-RUBY, __FILE__, __LINE__ + 1
-          def #{callback_name}                                                     # def _update_completed_in_project_callback
-            return true unless parent_id = self[:#{association.foreign_key}]       #   return true unless parent_id = self[:project_id]
-            parent = #{self.name}.find(parent_id)                                  #   parent = Project.find(parent_id)
-            parent.#{update_method}!                                               #   parent._update_completed!
-          end                                                                      # end
-          after_save :#{callback_name}, if: conditional_block[:save]               # after_save :_update_completed_in_project_callback
-          after_destroy :#{callback_name}, if: conditional_block[:destroy]         # after_destroy :_update_completed_in_project_callback
+          def #{callback_name}                                                # def _update_completed_in_project_callback
+            return true unless parent_id = self[:#{association.foreign_key}]  #   return true unless parent_id = self[:project_id]
+            parent = #{self.name}.find(parent_id)                             #   parent = Project.find(parent_id)
+            if apply_persistize?(parent, self, "#{callback_name}")
+              parent.#{update_method}! 
+            end
+          end                                                                 # end
+          after_save :#{callback_name}                                        # after_save :_update_completed_in_project_callback
+          after_destroy :#{callback_name}                                     # after_destroy :_update_completed_in_project_callback
         RUBY
       end
 
       alias_method :generate_has_one_callback, :generate_has_many_callback        # implementation is just the same :)
 
-      def generate_has_many_through_callback(association, update_method, callback_name, conditional_block)
+      def generate_has_many_through_callback(association, update_method, callback_name)
         association.klass.class_eval <<-RUBY, __FILE__, __LINE__ + 1
           def #{callback_name}                                                                                # def _update_completed_in_person_callback
             return true unless through_id = self[:#{association.through_reflection.association_foreign_key}]  #   return true unless through_id = self[:project_id]
             through = #{association.through_reflection.class_name}.find(through_id)                           #   through = Project.find(through_id)
             return true unless parent_id = through[:#{association.through_reflection.foreign_key}]            #   return true unless parent_id = self[:person_id]
             parent = #{self.name}.find(parent_id)                                                             #   parent = Person.find(person_id)
-            parent.#{update_method}!                                                                          #   parent._update_completed!
+            if apply_persistize?(parent, self, "#{callback_name}")
+              parent.#{update_method}!                                                                        #   parent._update_completed!
+            end
           end                                                                                                 # end
-          after_save :#{callback_name}, if: conditional_block[:save]                                          # after_save :_update_completed_in_person_callback
-          after_destroy :#{callback_name}, if: conditional_block[:destroy]                                    # after_destroy :_update_completed_in_person_callback
+          after_save :#{callback_name}                                                                        # after_save :_update_completed_in_person_callback
+          after_destroy :#{callback_name}                                                                     # after_destroy :_update_completed_in_person_callback
         RUBY
       end
 
-      def generate_belongs_to_callback(association, update_method, callback_name, conditional_block)
+      def generate_belongs_to_callback(association, update_method, callback_name)
         association.klass.class_eval <<-RUBY, __FILE__, __LINE__ + 1
           def #{callback_name}                                               # def _update_project_name_in_task_callback
-            childs = #{self.name}.where({:#{association.foreign_key} => id}) #   childs = Task.where({:project_id => id})
-            childs.each(&:"#{update_method}!")                               #   childs.each(&:"_update_project_name!")
+            children = #{self.name}.where({:#{association.foreign_key} => id}) #   children = Task.where({:project_id => id})
+            children.each do |child|
+              if apply_persistize?(child, self, "#{callback_name}")
+                child.#{update_method}!
+              end
+            end
           end                                                                # end
-          after_save :#{callback_name}, if: conditional_block[:save]         # after_save :_update_project_name_in_task_callback
-          after_destroy :#{callback_name}, if: conditional_block[:destroy]   # after_destroy :_update_project_name_in_task_callback
+          after_save :#{callback_name}                                       # after_save :_update_project_name_in_task_callback
+          after_destroy :#{callback_name}                                    # after_destroy :_update_project_name_in_task_callback
         RUBY
       end
 
